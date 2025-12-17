@@ -1,14 +1,20 @@
 """
 Mesmer segmentation for MIBI data.
+
+Rongting Huang
+rthuang@stanford.edu
+2025 December
 """
 
 import json
 import time
 import logging
+from pathlib import Path
+from typing import Optional, List, Sequence, Dict
+
 import numpy as np
 import pandas as pd
 import tifffile
-from pathlib import Path
 
 # mesmer imports
 from deepcell.applications import Mesmer
@@ -22,39 +28,56 @@ import matplotlib.pyplot as plt
 
 # from ..utils.pyqupath.geojson import mask_to_geojson_joblib
 
-
-from pathlib import Path
-from typing import Optional, Sequence, Dict
-import tifffile
-
-
-
 def segmentation_mibi_mesmer(input_dir: Path, 
                              output_dir: Path,
-                             nuclear_markers: list = ["Histone H3", "dsDNA"],
-                             membrane_markers: list = ["CD45", "Vimentin-works", "Pan-Keratin", "CD163"],
-                             pixel_size_um=0.78,    
-                             maxima_threshold=0.075,
-                             interior_threshold=0.20,
+                             tag: Optional[str] = None,
+                             nuclear_markers: List[str] = ["Histone H3", "dsDNA"],
+                             membrane_markers: List[str] = ["CD45", "Vimentin-works", "Pan-Keratin", "CD163"],
+                             extract_markers: Optional[List[str]] = None,
+                             pixel_size_um: float = 0.78,    
+                             maxima_threshold: float = 0.075,
+                             interior_threshold: float = 0.20,
                              scale: bool = True,
-                             tag: str = None,
-                             num_threads: int = 8
+                             plotshow: bool = True,
+                             num_threads: int = 8,
                              ):
     """
     Perform cell segmentation on MIBI data using Mesmer model.
-    Args:   input_array (np.ndarray): 4D numpy array of shape (1, H, W, C) representing the multiplexed image data.
-            pixel_size_um (float): Pixel size in micrometers. Default is 0.78 in EC Pembro.
-            maxima_threshold (float): Maxima threshold for post-processing. Default is 0.075.
-            interior_threshold (float): Interior threshold for post-processing. Default is 0.20.
-    Returns:    np.ndarray: 3D numpy array of shape (H, W, 1) representing the segmentation mask.
-    example:
+
+    Parameters
+    ----------
+    input_dir (Path): 
+        Path to the directory containing the MIBI image data.
+    output_dir (Path): 
+        Path to the directory where segmentation results will be saved.
+    nuclear_markers (List[str]): 
+        List of nuclear markers to use for segmentation.
+    membrane_markers (List[str]): 
+        List of membrane markers to use for segmentation.
+    extract_markers (Optional[List[str]]): 
+        List of markers to extract features from. If None, all markers are extracted.
+    pixel_size_um (float): 
+        Pixel size in micrometers. Default is 0.78 in EC Pembro.
+    maxima_threshold (float): 
+        Maxima threshold for post-processing. Default is 0.075.
+    interior_threshold (float): 
+        Interior threshold for post-processing. Default is 0.20.
+    scale (bool): 
+        Whether to scale the image data. Default is True.
+    tag (Optional[str]): 
+        Tag to append to the output directory name.
+    num_threads (int): 
+        Number of threads to use for segmentation. Default is 8.
+    
+    Returns
+    -------
+    np.ndarray: 3D numpy array of shape (H, W, 1) representing the segmentation mask.
+    
+    Example:
         from pathlib import Path
         input_dir = Path("/path/to/mibi/image_directory")
         output_dir = Path("/path/to/save/segmentation_results")
-        segmentation_mibi_mesmer(input_dir, output_dir)
-
-
-    # marker_names_all = ["Histone H3", "dsDNA", "CD45", "Vimentin-works", "Pan-Keratin", "CD163"]   
+        segmentation_mibi_mesmer(input_dir, output_dir)  
     """
     # Path handling
     input_dir, output_dir, segmentation_dir = prepare_seg_paths(input_dir, output_dir, tag)
@@ -68,41 +91,57 @@ def segmentation_mibi_mesmer(input_dir: Path,
                                                        scale=scale,
                                                        scale_type="none")
     # setup_gpu("1")
-    # run mesmer segmentation
+    # Run Mesmer Segmentation
     mesmer = Mesmer()
-    predictions = mesmer.predict(marker_array, image_mpp = pixel_size_um,
+    segmentation_predictions = mesmer.predict(marker_array, image_mpp = pixel_size_um,
                                   postprocess_kwargs_whole_cell={"maxima_threshold" : maxima_threshold,
                                                                  "interior_threshold" : interior_threshold})
+    segmentation_predictions_nuc = mesmer.predict(marker_array, image_mpp = pixel_size_um, compartment='nuclear')
+    # other fine-tune if needed
+    # segmentation_predictions_expansion.   postprocess_kwargs_nuclear={'pixel_expansion': 1}
     
 
     # create outline overlay
-    rgb_image, overlay = view_mesmer_segmentation_results(marker_array, predictions, plotshow=True)
-
-    # predictions = predictions[0, :, :, 0]  # HW1
-    # # save segmentation mask
-    # segmentation_mask_f = segmentation_dir / "segmentation_mask.tiff"
-    # tifffile.imwrite(str(segmentation_mask_f), predictions.astype(np.uint16))
+    rgb_image, overlay = view_mesmer_segmentation_results(marker_array, 
+                                                          segmentation_predictions, 
+                                                          plottitle="Segmentation: Whole-cell",
+                                                          plotshow=plotshow,
+                                                          save_path=segmentation_dir/ "mesmer_segmentation_whole_cell.png")
+    rgb_image, nuclear_overlay = view_mesmer_segmentation_results(marker_array, 
+                                                          segmentation_predictions_nuc, 
+                                                          plottitle="Segmentation: Nuclear",
+                                                          plotshow=plotshow,
+                                                          save_path=segmentation_dir/ "mesmer_segmentation_nuclear.png")
     
-    # rgb_image = create_rgb_image(marker_array, channel_colors = ["green", "blue"])
-    # overlay = make_outline_overlay(rgb_data = rgb_image, predictions = predictions)
-    segmentation_mask = predictions[0,...,0]
+
+    # Save segmentation mask
+    segmentation_mask = segmentation_predictions[0,...,0]
     segmentation_mask_file = segmentation_dir / "segmentation_mask.tiff"
-    tifffile.imwrite(str(segmentation_mask_file), segmentation_mask)
+    tifffile.imwrite(str(segmentation_mask_file), segmentation_mask.astype(np.uint16))
+    
+    segmentation_mask_nuclear = segmentation_predictions_nuc[0,...,0]
+    segmentation_mask_nuclear_file = segmentation_dir / "segmentation_mask_nuclear.tiff" 
+    tifffile.imwrite(str(segmentation_mask_nuclear_file), segmentation_mask_nuclear.astype(np.uint16))
     # logging.info("Segmentation completed.")
 
     # # save geojson for visualization in QuPath
     # mask_to_geojson_joblib(segmentation_mask, segmentation_mask_file, n_jobs=8)
 
-    
-    
-    # Extract single-cell features
-    # data, data_scale = extract_cell_features(marker_dict, segmentation_mask)
+    # Extract single-cell features for downstream analysis
+    if extract_markers is None:
+        tiff_files = list(input_dir.glob("*.tiff")) + list(input_dir.glob("*.tif"))
+        extract_markers = [f.stem for f in tiff_files]
+        print(f"Auto-detected {len(extract_markers)} markers from input directory to be extracted")
+    else:
+        print(f"Using {len(extract_markers)} specified markers to be extracted")
+
     marker_dict = get_marker_dict(
         unit_dir=input_dir,
-        include=nuclear_markers + membrane_markers,
+        include=extract_markers,
         exclude=None,
         recursive=False,
     )
+
     data, data_scale = SingleCellExraction(method="intensity",
                                            marker_dict=marker_dict,
                                            segmentation_mask=segmentation_mask)
@@ -112,92 +151,25 @@ def segmentation_mibi_mesmer(input_dir: Path,
 
     # Write parameters
     params = {
+        "input_dir": str(input_dir),
+        "output_dir": str(output_dir),
+        "tag": tag,
         "nuclear_markers": nuclear_markers,
         "membrane_markers": membrane_markers,
+        "extract_markers": extract_markers,
         "scale": scale,
         "pixel_size_um": pixel_size_um,
         "maxima_threshold": maxima_threshold,
         "interior_threshold": interior_threshold,
-        "compartment": "whole-cell",
+        "compartment": "whole-cell & nuclear",
     }
     with open(
-        f"{segmentation_dir}/parameter_segmentation.json", "w", encoding="utf-8"
+        f"{segmentation_dir}/segmentation_parameters_record.json", "w", encoding="utf-8"
     ) as file:
         json.dump(params, file, indent=4, ensure_ascii=False)
     
-    return predictions
-
-
-
-def get_marker_dict(
-    unit_dir: Path,
-    include: Optional[Sequence[str]] = None,
-    exclude: Optional[Sequence[str]] = None,
-    recursive: bool = False,
-) -> Dict[str, "np.ndarray"]:
-    """
-    Load all marker TIFF files from a folder into a dictionary.
-
-    Parameters
-    ----------
-    unit_dir : Path
-        Directory that contains marker TIFF files.
-    include : list[str], optional
-        Marker names to include (only these will be loaded).
-    exclude : list[str], optional
-        Marker names to exclude.
-    recursive : bool, default=False
-        Whether to search subfolders recursively.
-
-    Returns
-    -------
-    dict[str, np.ndarray]
-        Dictionary mapping marker name → image array.
-    """
-
-    unit_dir = Path(unit_dir)
-    if not unit_dir.exists():
-        raise FileNotFoundError(f"Input folder not found: {unit_dir}")
-    if not unit_dir.is_dir():
-        raise NotADirectoryError(f"Not a directory: {unit_dir}")
-
-    # logical constraints
-    if include and exclude:
-        raise ValueError("You can use either 'include' or 'exclude', not both.")
-    
-    include = set(include) if include else None
-    exclude = set(exclude) if exclude else None
-
-
-    # Glob pattern
-    pattern = "**/*.tif*" if recursive else "*.tif*"
-    marker_dict = {}
-
-    for path in unit_dir.glob(pattern):
-        if not path.is_file():
-            continue
-        marker_name = path.stem  # use original case
-
-        # apply filters
-        if include is not None:
-            if marker_name not in include:
-                continue
-        elif exclude is not None:
-            if marker_name in exclude:
-                continue
-        # (neither include nor exclude → load everything)
-
-        try:
-            img = tifffile.imread(path)
-        except Exception as e:
-            print(f"[WARNING] Failed to read {path.name}: {e}")
-            continue
-
-        marker_dict[marker_name] = img
-
-    print(f"[INFO] Loaded {len(marker_dict)} markers from {unit_dir}")
-    return marker_dict
-
+    # return segmentation_predictions, segmentation_predictions_nuc
+    return segmentation_predictions
 
 
 def prepare_seg_paths(input_dir, output_dir, tag=None):
@@ -352,46 +324,157 @@ def process_mesmer_segmentation_markers(
     )
     return combined_array
 
-
 def view_mesmer_segmentation_results(
     marker_array: np.ndarray,
     segmentation_mask: np.ndarray,
-    plotshow: bool = True
+    plotshow: bool = True,
+    plottitle: str = "Mesmer segmentation results",
+    figsize: tuple = (30, 15),
+    title_fontsize: int = 20,
+    subtitle_fontsize: int = 16,
+    save_path: str = None,
+    dpi: int = 300
 ):
     """
     Visualize Mesmer segmentation results.
 
     Parameters
     ----------
-    input_array : np.ndarray
+    marker_array : np.ndarray
         4D numpy array of shape (1, H, W, C) representing the multiplexed image data.
     segmentation_mask : np.ndarray
         2D numpy array of shape (H, W) representing the segmentation mask.
+    plotshow : bool
+        Whether to display the plot
+    plottitle : str
+        Main title for the entire figure
+    figsize : tuple
+        Figure size as (width, height)
+    title_fontsize : int
+        Font size for the main title
+    subtitle_fontsize : int
+        Font size for subplot titles
+    save_path : str, optional
+        Path to save the figure. If None, figure is not saved.
+        Can include directory and filename (e.g., 'output/mesmer_results.png')
+    dpi : int
+        Resolution for saved figure (dots per inch)
 
     Returns
     -------
-    np.ndarray
-        RGB image with segmentation outlines overlaid on the input image.
+    tuple[np.ndarray, np.ndarray]
+        - An RGB image of the input marker data.
+        - An RGB image with segmentation outlines overlaid on the input image.
     """
+
     rgb_image = create_rgb_image(marker_array, channel_colors=["green", "blue"])
     overlay = make_outline_overlay(rgb_data=rgb_image, predictions=segmentation_mask)
-    if plotshow:
+    
+    if plotshow or save_path:
         idx = 0
 
         # plot the data
-        fig, ax = plt.subplots(1, 2, figsize=(10, 5))
+        fig, ax = plt.subplots(1, 2, figsize=figsize)
+        # Add main title to the entire figure
+        fig.suptitle(plottitle, fontsize=title_fontsize, fontweight='bold', y=0.98)
+        # Plot the raw data and predictions
         ax[0].imshow(rgb_image[idx, ...])
         ax[1].imshow(overlay[idx, ...])
-
-        ax[0].set_title('Raw data')
-        ax[1].set_title('Predictions')
+        # Set subplot titles with custom font size
+        ax[0].set_title('Raw data', fontsize=subtitle_fontsize)
+        ax[1].set_title('Predictions', fontsize=subtitle_fontsize)
 
         for a in ax:
             a.axis('off')
+        # Adjust layout to prevent title overlap
+        plt.tight_layout(rect=[0, 0, 1, 0.96])  # Leave space at top for suptitle
 
-        plt.show()
-        # fig.savefig('mesmer-wc.png')
+        # Save figure if path is provided
+        if save_path:
+            # Create directory if it doesn't exist
+            save_path = Path(save_path)
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Save the figure
+            fig.savefig(save_path, dpi=dpi, bbox_inches='tight', facecolor='white')
+            print(f"Figure saved to: {save_path}")
+        
+        # Show plot if requested
+        if plotshow:
+            plt.show()
+        else:
+            plt.close(fig)  # Close figure to free memory if not showing
     return rgb_image, overlay
+
+
+def get_marker_dict(
+    unit_dir: Path,
+    include: Optional[Sequence[str]] = None,
+    exclude: Optional[Sequence[str]] = None,
+    recursive: bool = False,
+) -> Dict[str, "np.ndarray"]:
+    """
+    Load all marker TIFF files from a folder into a dictionary.
+
+    Parameters
+    ----------
+    unit_dir : Path
+        Directory that contains marker TIFF files.
+    include : list[str], optional
+        Marker names to include (only these will be loaded).
+    exclude : list[str], optional
+        Marker names to exclude.
+    recursive : bool, default=False
+        Whether to search subfolders recursively.
+
+    Returns
+    -------
+    dict[str, np.ndarray]
+        Dictionary mapping marker name → image array.
+    """
+
+    unit_dir = Path(unit_dir)
+    if not unit_dir.exists():
+        raise FileNotFoundError(f"Input folder not found: {unit_dir}")
+    if not unit_dir.is_dir():
+        raise NotADirectoryError(f"Not a directory: {unit_dir}")
+
+    # logical constraints
+    if include and exclude:
+        raise ValueError("You can use either 'include' or 'exclude', not both.")
+    
+    include = set(include) if include else None
+    exclude = set(exclude) if exclude else None
+
+
+    # Glob pattern
+    pattern = "**/*.tif*" if recursive else "*.tif*"
+    marker_dict = {}
+
+    for path in unit_dir.glob(pattern):
+        if not path.is_file():
+            continue
+        marker_name = path.stem  # use original case
+
+        # apply filters
+        if include is not None:
+            if marker_name not in include:
+                continue
+        elif exclude is not None:
+            if marker_name in exclude:
+                continue
+        # (neither include nor exclude → load everything)
+
+        try:
+            img = tifffile.imread(path)
+        except Exception as e:
+            print(f"[WARNING] Failed to read {path.name}: {e}")
+            continue
+
+        marker_dict[marker_name] = img
+
+    print(f"[INFO] Loaded {len(marker_dict)} markers from {unit_dir}")
+    return marker_dict
 
 
 def extract_cell_features(
